@@ -1,0 +1,123 @@
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import javax.servlet.FilterChain;
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.stream.Collectors;
+
+
+/**
+ * @author Maxim Bezmen.
+ * 16.08.2021
+ * <p>
+ * HmacFilter check valid of hmac in requests
+ */
+@Slf4j
+@Component
+@Order(value = Ordered.HIGHEST_PRECEDENCE)
+public class OneFilter extends OncePerRequestFilter {
+    @Value(value = "${key.hmacKey}")
+    private String hmacKey;
+    @Value(value = "${key.algorithm}")
+    private String algorithm;
+    @Autowired
+    private ObjectMapper mapper;
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest httpServletRequest, HttpServletResponse httpServletResponse, FilterChain filterChain) throws ServletException, IOException {
+        final String hmacKeyFromRequest = getHmacKeyFromRequest(httpServletRequest);
+        if (hmacKeyFromRequest == null) {
+            log.error(NOT_KEY);
+            throw new BadRequestException(NOT_KEY);
+        }
+        final CachedBodyHttpServletRequest cachedBodyHttpServletRequest = new CachedBodyHttpServletRequest(httpServletRequest);
+        final String test = getBodyFromRequest(cachedBodyHttpServletRequest);
+        try {
+            String hmac = calculateHMac(test);
+            if (!hmac.equals(hmacKeyFromRequest)) {
+                log.error(NOT_VALID_HMAC_KEY + " For {}", hmacKeyFromRequest);
+                throw new BadRequestException(NOT_VALID_HMAC_KEY);
+            }
+            filterChain.doFilter(cachedBodyHttpServletRequest, httpServletResponse);
+        } catch (Exception e) {
+            log.error(e.getMessage());
+            ExceptionDto errorDto = new ExceptionDto(HttpStatus.BAD_REQUEST, e.getMessage());
+            httpServletResponse.setStatus(HttpStatus.BAD_REQUEST.value());
+            httpServletResponse.setContentType(CONTENT_TYPE_APPLICATION_JSON);
+            httpServletResponse.getWriter().write(mapper.writeValueAsString(errorDto));
+        }
+
+    }
+
+    /**
+     * Get body as string from request
+     *
+     * @param request HttpServletRequest
+     * @return String body as string
+     * @throws IOException if exception in reading
+     */
+    private String getBodyFromRequest(final HttpServletRequest request) throws IOException {
+        return request.getReader().lines().collect(Collectors.joining(System.lineSeparator()));
+    }
+
+    /**
+     * Calculate HMac for body
+     *
+     * @param data Body from request
+     * @return String HMac
+     * @throws Exception if exception in calculate HMac
+     */
+    private String calculateHMac(final String data) throws Exception {
+        final Mac sha256HMAC = Mac.getInstance(algorithm);
+
+        final SecretKeySpec secretKey = new SecretKeySpec(hmacKey.getBytes(StandardCharsets.UTF_8), algorithm);
+        sha256HMAC.init(secretKey);
+        return byteArrayToHex(sha256HMAC.doFinal(data.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    /**
+     * Mapping byteArray to Hex
+     *
+     * @param a byte array
+     * @return final String HMac
+     */
+    private String byteArrayToHex(final byte[] a) {
+        final StringBuilder sb = new StringBuilder(a.length * 2);
+        for (byte b : a)
+            sb.append(String.format("%02x", b));
+        return sb.toString();
+    }
+
+    /**
+     * Get hmac Key from request
+     *
+     * @param httpRequest request for work
+     * @return String of HMac
+     */
+    private String getHmacKeyFromRequest(final HttpServletRequest httpRequest) {
+        final String hmacKeyFromRequest = httpRequest.getHeader(HEADER_HMAC);
+        if (hmacKeyFromRequest == null) {
+            log.error(NOT_KEY);
+            throw new BadRequestException(NOT_KEY);
+        }
+        final String[] result = hmacKeyFromRequest.split("=");
+        if (result.length == 2) {
+            return result[1];
+        }
+        return null;
+    }
+}
